@@ -1,16 +1,20 @@
-{
-  "parser": "@typescript-eslint/parser",
+{  
   "plugins": ["@typescript-eslint", "import"],
   "extends": [
     "plugin:@typescript-eslint/eslint-recommended",
     "plugin:@typescript-eslint/recommended",
-    "plugin:import/typescript",
-    "prettier"
+    "plugin:jest/recommended",
+    "plugin:import/typescript",    
+    "prettier",
+    "eslint:recommended",
+    "plugin:vue/recommended"
   ],
   "env": {
-    "es6": true
+    "es6": true,
+    "jest/globals": true
   },
-  "parserOptions": {
+  "parserOptions": {    
+    "parser": "@typescript-eslint/parser",
     "sourceType": "module"
   },
   "rules": {
@@ -28,6 +32,12 @@
     ],
     "no-shadow": "error",
     "import/no-cycle": "error",
-    "import/no-unused-modules": ["off", { "unusedExports": true }]
-  }
+    "import/no-unused-modules": ["off", { "unusedExports": true }],
+    "jest/no-disabled-tests": "warn",
+    "jest/no-focused-tests": "error",
+    "jest/no-identical-title": "error",
+    "jest/prefer-to-have-length": "warn",
+    "jest/valid-expect": "error"
+  },
+  "ignorePatterns": [ "/src/core/*" ] 
 }
