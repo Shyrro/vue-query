@@ -7,7 +7,7 @@
     "plugin:import/typescript",    
     "prettier",
     "eslint:recommended",
-    "plugin:vue/recommended"
+    "plugin:vue/vue3-recommended"
   ],
   "env": {
     "es6": true,
