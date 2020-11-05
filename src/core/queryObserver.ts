@@ -1,6 +1,5 @@
 import {
   getStatusProps,
-  isDocumentVisible,
   isServer,
   isValidTimeout,
   noop,
@@ -10,8 +9,8 @@ import {
 } from './utils'
 import { notifyManager } from './notifyManager'
 import type {
-  FetchNextPageOptions,
-  FetchPreviousPageOptions,
+  PlaceholderDataFunction,
+  QueryObserverBaseResult,
   QueryObserverOptions,
   QueryObserverResult,
   QueryOptions,
@@ -20,16 +19,8 @@ import type {
 } from './types'
 import type { Query, QueryState, Action, FetchOptions } from './query'
 import type { QueryClient } from './queryClient'
-
-interface QueryObserverConfig<
-  TData = unknown,
-  TError = unknown,
-  TQueryFnData = TData,
-  TQueryData = TQueryFnData
-> {
-  client: QueryClient
-  options?: QueryObserverOptions<TData, TError, TQueryFnData, TQueryData>
-}
+import { focusManager } from './focusManager'
+import { Subscribable } from './subscribable'
 
 type QueryObserverListener<TData, TError> = (
   result: QueryObserverResult<TData, TError>
@@ -42,12 +33,16 @@ interface NotifyOptions {
   onSuccess?: boolean
 }
 
+export interface ObserverFetchOptions extends FetchOptions {
+  throwOnError?: boolean
+}
+
 export class QueryObserver<
   TData = unknown,
   TError = unknown,
   TQueryFnData = TData,
   TQueryData = TQueryFnData
-> {
+> extends Subscribable<QueryObserverListener<TData, TError>> {
   options: QueryObserverOptions<TData, TError, TQueryFnData, TQueryData>
 
   private client: QueryClient
@@ -55,67 +50,74 @@ export class QueryObserver<
   private currentResult!: QueryObserverResult<TData, TError>
   private currentResultState?: QueryState<TQueryData, TError>
   private previousQueryResult?: QueryObserverResult<TData, TError>
-  private listeners: QueryObserverListener<TData, TError>[]
   private initialDataUpdateCount: number
   private staleTimeoutId?: number
   private refetchIntervalId?: number
 
   constructor(
-    config: QueryObserverConfig<TData, TError, TQueryFnData, TQueryData>
+    client: QueryClient,
+    options: QueryObserverOptions<TData, TError, TQueryFnData, TQueryData>
   ) {
-    this.client = config.client
-    this.options = config.client.defaultQueryObserverOptions(config.options)
-    this.listeners = []
-    this.initialDataUpdateCount = 0
+    super()
 
-    // Bind exposed methods
+    this.client = client
+    this.options = options
+    this.initialDataUpdateCount = 0
+    this.bindMethods()
+    this.setOptions(options)
+  }
+
+  protected bindMethods(): void {
     this.remove = this.remove.bind(this)
     this.refetch = this.refetch.bind(this)
-    this.fetchNextPage = this.fetchNextPage.bind(this)
-    this.fetchPreviousPage = this.fetchPreviousPage.bind(this)
-
-    // Subscribe to the query
-    this.updateQuery()
   }
 
-  subscribe(listener?: QueryObserverListener<TData, TError>): () => void {
-    const callback = listener || (() => undefined)
-    this.listeners.push(callback)
+  protected onSubscribe(): void {
     if (this.listeners.length === 1) {
-      this.onMount()
-    }
-    return () => {
-      this.unsubscribe(callback)
+      this.updateQuery()
+
+      this.currentQuery.addObserver(this)
+
+      if (this.willFetchOnMount()) {
+        this.executeFetch()
+      }
+
+      this.updateTimers()
     }
   }
 
-  private unsubscribe(listener: QueryObserverListener<TData, TError>): void {
-    this.listeners = this.listeners.filter(x => x !== listener)
+  protected onUnsubscribe(): void {
     if (!this.listeners.length) {
-      this.clear()
+      this.destroy()
     }
-  }
-
-  private onMount(): void {
-    this.currentQuery.subscribeObserver(this)
-
-    if (this.willFetchOnMount()) {
-      this.executeFetch()
-    }
-
-    this.updateTimers()
   }
 
   willFetchOnMount(): boolean {
     return (
       this.options.enabled !== false &&
-      (!this.currentQuery.state.updatedAt ||
+      (!this.currentQuery.state.dataUpdatedAt ||
         this.options.refetchOnMount === 'always' ||
         (this.options.refetchOnMount !== false && this.isStale()))
     )
   }
 
-  willFetchOptionally(): boolean {
+  willFetchOnReconnect(): boolean {
+    return (
+      this.options.enabled !== false &&
+      (this.options.refetchOnReconnect === 'always' ||
+        (this.options.refetchOnReconnect !== false && this.isStale()))
+    )
+  }
+
+  willFetchOnWindowFocus(): boolean {
+    return (
+      this.options.enabled !== false &&
+      (this.options.refetchOnWindowFocus === 'always' ||
+        (this.options.refetchOnWindowFocus !== false && this.isStale()))
+    )
+  }
+
+  private willFetchOptionally(): boolean {
     return this.options.enabled !== false && this.isStale()
   }
 
@@ -123,10 +125,10 @@ export class QueryObserver<
     return this.currentQuery.isStaleByTime(this.options.staleTime)
   }
 
-  clear(): void {
+  destroy(): void {
     this.listeners = []
     this.clearTimers()
-    this.currentQuery.unsubscribeObserver(this)
+    this.currentQuery.removeObserver(this)
   }
 
   setOptions(
@@ -136,6 +138,13 @@ export class QueryObserver<
     const prevQuery = this.currentQuery
 
     this.options = this.client.defaultQueryObserverOptions(options)
+
+    if (
+      typeof this.options.enabled !== 'undefined' &&
+      typeof this.options.enabled !== 'boolean'
+    ) {
+      throw new Error('Expected enabled to be a boolean')
+    }
 
     // Keep previous query key if the user does not supply one
     if (!this.options.queryKey) {
@@ -182,17 +191,6 @@ export class QueryObserver<
     return this.currentResult
   }
 
-  getCurrentOrNextResult(
-    options?: ResultOptions
-  ): Promise<QueryObserverResult<TData, TError>> {
-    if (this.currentQuery.isFetching()) {
-      return this.getNextResult(options)
-    } else if (this.currentResult.isError && options?.throwOnError) {
-      return Promise.reject(this.currentResult.error)
-    }
-    return Promise.resolve(this.currentResult)
-  }
-
   getNextResult(
     options?: ResultOptions
   ): Promise<QueryObserverResult<TData, TError>> {
@@ -215,7 +213,7 @@ export class QueryObserver<
   }
 
   remove(): void {
-    this.currentQuery.remove()
+    this.client.getQueryCache().remove(this.currentQuery)
   }
 
   refetch(
@@ -224,33 +222,13 @@ export class QueryObserver<
     return this.fetch(options)
   }
 
-  fetchNextPage(
-    options?: FetchNextPageOptions
+  protected fetch(
+    fetchOptions?: ObserverFetchOptions
   ): Promise<QueryObserverResult<TData, TError>> {
-    return this.fetch({
-      throwOnError: options?.throwOnError,
-      fetchMore: { direction: 'forward', pageParam: options?.pageParam },
+    return this.executeFetch(fetchOptions).then(() => {
+      this.updateResult()
+      return this.currentResult
     })
-  }
-
-  fetchPreviousPage(
-    options?: FetchPreviousPageOptions
-  ): Promise<QueryObserverResult<TData, TError>> {
-    return this.fetch({
-      throwOnError: options?.throwOnError,
-      fetchMore: { direction: 'backward', pageParam: options?.pageParam },
-    })
-  }
-
-  fetch(
-    fetchOptions?: FetchOptions
-  ): Promise<QueryObserverResult<TData, TError>> {
-    if (!this.canFetch()) {
-      return this.getCurrentOrNextResult()
-    }
-    const promise = this.getNextResult(fetchOptions)
-    this.executeFetch(fetchOptions)
-    return promise
   }
 
   private optionalFetch(): void {
@@ -259,16 +237,23 @@ export class QueryObserver<
     }
   }
 
-  private executeFetch(fetchOptions?: FetchOptions): void {
-    if (this.canFetch()) {
-      this.currentQuery.fetch(this.getQueryOptions(), fetchOptions).catch(noop)
-    }
-  }
+  private executeFetch(
+    fetchOptions?: ObserverFetchOptions
+  ): Promise<TQueryData | undefined> {
+    // Make sure we reference the latest query as the current one might have been removed
+    this.updateQuery()
 
-  private canFetch(): boolean {
-    return Boolean(
-      this.options.queryFn || this.currentQuery.defaultOptions?.queryFn
+    // Fetch
+    let promise: Promise<TQueryData | undefined> = this.currentQuery.fetch(
+      this.options as QueryOptions<TQueryData, TError, TQueryFnData>,
+      fetchOptions
     )
+
+    if (!fetchOptions?.throwOnError) {
+      promise = promise.catch(noop)
+    }
+
+    return promise
   }
 
   private updateStaleTimeout(): void {
@@ -294,7 +279,10 @@ export class QueryObserver<
     this.staleTimeoutId = setTimeout(() => {
       if (!this.currentResult.isStale) {
         this.updateResult()
-        this.notify({ listeners: true, cache: true })
+        this.notify({
+          listeners: this.options.notifyOnStaleChange === true,
+          cache: true,
+        })
       }
     }, timeout)
   }
@@ -311,18 +299,21 @@ export class QueryObserver<
     }
 
     this.refetchIntervalId = setInterval(() => {
-      if (this.options.refetchIntervalInBackground || isDocumentVisible()) {
+      if (
+        this.options.refetchIntervalInBackground ||
+        focusManager.isFocused()
+      ) {
         this.executeFetch()
       }
     }, this.options.refetchInterval)
   }
 
-  updateTimers(): void {
+  private updateTimers(): void {
     this.updateStaleTimeout()
     this.updateRefetchInterval()
   }
 
-  clearTimers(): void {
+  private clearTimers(): void {
     this.clearStaleTimeout()
     this.clearRefetchInterval()
   }
@@ -337,17 +328,17 @@ export class QueryObserver<
     this.refetchIntervalId = undefined
   }
 
-  private getQueryOptions(): QueryOptions<TQueryData, TError, TQueryFnData> {
-    return this.options as QueryOptions<TQueryData, TError, TQueryFnData>
-  }
-
-  private updateResult(willFetch?: boolean): void {
+  protected getNewResult(
+    willFetch?: boolean
+  ): QueryObserverResult<TData, TError> {
     const { state } = this.currentQuery
-    let { status, isFetching, updatedAt } = state
+    let { isFetching, status } = state
     let isPreviousData = false
+    let isPlaceholderData = false
     let data: TData | undefined
+    let updatedAt = state.dataUpdatedAt
 
-    // Already set the status to loading if we are going to fetch
+    // Optimistically set status to loading if we will start fetching
     if (willFetch) {
       isFetching = true
       if (status === 'idle') {
@@ -365,7 +356,9 @@ export class QueryObserver<
       updatedAt = this.previousQueryResult.updatedAt
       status = this.previousQueryResult.status
       isPreviousData = true
-    } else if (this.options.select && typeof state.data !== 'undefined') {
+    }
+    // Select data if needed
+    else if (this.options.select && typeof state.data !== 'undefined') {
       // Use the previous select result if the query data did not change
       if (this.currentResult && state.data === this.currentResultState?.data) {
         data = this.currentResult.data
@@ -375,39 +368,58 @@ export class QueryObserver<
           data = replaceEqualDeep(this.currentResult?.data, data)
         }
       }
-    } else {
+    }
+    // Use query data
+    else {
       data = (state.data as unknown) as TData
     }
 
-    const result: QueryObserverResult<TData, TError> = {
+    // Show placeholder data if needed
+    if (
+      typeof this.options.placeholderData !== 'undefined' &&
+      typeof data === 'undefined' &&
+      status === 'loading'
+    ) {
+      const placeholderData =
+        typeof this.options.placeholderData === 'function'
+          ? (this.options.placeholderData as PlaceholderDataFunction<TData>)()
+          : this.options.placeholderData
+      if (typeof placeholderData !== 'undefined') {
+        status = 'success'
+        data = placeholderData
+        isPlaceholderData = true
+      }
+    }
+
+    const result: QueryObserverBaseResult<TData, TError> = {
       ...getStatusProps(status),
       data,
       error: state.error,
-      failureCount: state.failureCount,
-      fetchNextPage: this.fetchNextPage,
-      fetchPreviousPage: this.fetchPreviousPage,
-      hasNextPage: state.hasNextPage,
-      hasPreviousPage: state.hasPreviousPage,
+      failureCount: state.fetchFailureCount,
       isFetched: state.dataUpdateCount > 0,
       isFetchedAfterMount: state.dataUpdateCount > this.initialDataUpdateCount,
       isFetching,
-      isFetchingNextPage: state.isFetchingNextPage,
-      isFetchingPreviousPage: state.isFetchingPreviousPage,
+      isLoadingError: status === 'error' && state.dataUpdatedAt === 0,
+      isPlaceholderData,
       isPreviousData,
+      isRefetchError: status === 'error' && state.dataUpdatedAt !== 0,
       isStale: this.isStale(),
       refetch: this.refetch,
       remove: this.remove,
       updatedAt,
     }
 
+    return result as QueryObserverResult<TData, TError>
+  }
+
+  private updateResult(willFetch?: boolean): void {
+    const result = this.getNewResult(willFetch)
+
     // Keep reference to the current state on which the current result is based on
-    this.currentResultState = state
+    this.currentResultState = this.currentQuery.state
 
     // Only update if something has changed
-    if (
-      !this.currentResult ||
-      !shallowEqualObjects(this.currentResult, result)
-    ) {
+    if (!shallowEqualObjects(result, this.currentResult)) {
       this.currentResult = result
     }
   }
@@ -415,8 +427,12 @@ export class QueryObserver<
   private updateQuery(): void {
     const prevQuery = this.currentQuery
 
-    const queryOptions = this.getQueryOptions()
-    const query = this.client.getCache().build(queryOptions)
+    const query = this.client
+      .getQueryCache()
+      .build(
+        this.client,
+        this.options as QueryOptions<TQueryData, TError, TQueryFnData>
+      )
 
     if (query === prevQuery) {
       return
@@ -432,12 +448,12 @@ export class QueryObserver<
 
     this.updateResult(willFetch)
 
-    if (!this.listeners.length) {
+    if (!this.hasListeners()) {
       return
     }
 
-    prevQuery?.unsubscribeObserver(this)
-    this.currentQuery.subscribeObserver(this)
+    prevQuery?.removeObserver(this)
+    this.currentQuery.addObserver(this)
 
     if (this.options.notifyOnStatusChange !== false) {
       this.notify({ listeners: true })
@@ -445,18 +461,13 @@ export class QueryObserver<
   }
 
   onQueryUpdate(action: Action<TData, TError>): void {
-    const { options } = this
-    const { type } = action
-
     // Store current result and get new result
     const prevResult = this.currentResult
     this.updateResult()
     const currentResult = this.currentResult
 
-    // Update timers if needed
-    if (type === 'success' || type === 'error' || type === 'invalidate') {
-      this.updateTimers()
-    }
+    // Update timers
+    this.updateTimers()
 
     // Do not notify if the nothing has changed
     if (prevResult === currentResult) {
@@ -466,15 +477,15 @@ export class QueryObserver<
     // Determine which callbacks to trigger
     const notifyOptions: NotifyOptions = {}
 
-    if (type === 'success') {
+    if (action.type === 'success') {
       notifyOptions.onSuccess = true
-    } else if (type === 'error') {
+    } else if (action.type === 'error') {
       notifyOptions.onError = true
     }
 
     if (
       // Always notify if notifyOnStatusChange is set
-      options.notifyOnStatusChange !== false ||
+      this.options.notifyOnStatusChange !== false ||
       // Otherwise only notify on data or error change
       currentResult.data !== prevResult.data ||
       currentResult.error !== prevResult.error
@@ -486,47 +497,26 @@ export class QueryObserver<
   }
 
   private notify(notifyOptions: NotifyOptions): void {
-    const { options, currentResult, currentQuery, listeners } = this
-    const { onSuccess, onSettled, onError } = options
-
     notifyManager.batch(() => {
       // First trigger the configuration callbacks
       if (notifyOptions.onSuccess) {
-        if (onSuccess) {
-          notifyManager.schedule(() => {
-            onSuccess(currentResult.data!)
-          })
-        }
-        if (onSettled) {
-          notifyManager.schedule(() => {
-            onSettled(currentResult.data!, null)
-          })
-        }
+        this.options.onSuccess?.(this.currentResult.data!)
+        this.options.onSettled?.(this.currentResult.data!, null)
       } else if (notifyOptions.onError) {
-        if (onError) {
-          notifyManager.schedule(() => {
-            onError(currentResult.error!)
-          })
-        }
-        if (onSettled) {
-          notifyManager.schedule(() => {
-            onSettled(undefined, currentResult.error!)
-          })
-        }
+        this.options.onError?.(this.currentResult.error!)
+        this.options.onSettled?.(undefined, this.currentResult.error!)
       }
 
       // Then trigger the listeners
       if (notifyOptions.listeners) {
-        listeners.forEach(listener => {
-          notifyManager.schedule(() => {
-            listener(currentResult)
-          })
+        this.listeners.forEach(listener => {
+          listener(this.currentResult)
         })
       }
 
       // Then the cache listeners
       if (notifyOptions.cache) {
-        this.client.getCache().notify(currentQuery)
+        this.client.getQueryCache().notify(this.currentQuery)
       }
     })
   }

@@ -1,3 +1,6 @@
+import type { MutationState } from './mutation'
+import type { QueryBehavior } from './query'
+import type { RetryValue, RetryDelayValue } from './retryer'
 import type { QueryFilters } from './utils'
 
 export type QueryKey = string | unknown[]
@@ -8,12 +11,9 @@ export type InitialDataFunction<T> = () => T | undefined
 
 export type InitialStaleFunction = () => boolean
 
-export type QueryKeyHashFunction = (queryKey: QueryKey) => string
+export type PlaceholderDataFunction<TResult> = () => TResult | undefined
 
-export type ShouldRetryFunction<TError = unknown> = (
-  failureCount: number,
-  error: TError
-) => boolean
+export type QueryKeyHashFunction = (queryKey: QueryKey) => string
 
 export type GetPreviousPageParamFunction<TQueryFnData = unknown> = (
   firstPage: TQueryFnData,
@@ -25,7 +25,10 @@ export type GetNextPageParamFunction<TQueryFnData = unknown> = (
   allPages: TQueryFnData[]
 ) => unknown | undefined
 
-export type RetryDelayFunction = (attempt: number) => number
+export interface InfiniteData<TData> {
+  pages: TData[]
+  pageParams: unknown[]
+}
 
 export interface QueryOptions<
   TData = unknown,
@@ -38,8 +41,8 @@ export interface QueryOptions<
    * If set to an integer number, e.g. 3, failed queries will retry until the failed query count meets that number.
    * If set to a function `(failureCount, error) => boolean` failed queries will retry until the function returns false.
    */
-  retry?: boolean | number | ShouldRetryFunction<TError>
-  retryDelay?: number | RetryDelayFunction
+  retry?: RetryValue<TError>
+  retryDelay?: RetryDelayValue
   cacheTime?: number
   isDataEqual?: (oldData: unknown, newData: unknown) => boolean
   queryFn?: QueryFunction<TQueryFnData>
@@ -48,7 +51,7 @@ export interface QueryOptions<
   queryKeyHashFn?: QueryKeyHashFunction
   queryFnParamsFilter?: (args: unknown[]) => unknown[]
   initialData?: TData | InitialDataFunction<TData>
-  infinite?: true
+  behavior?: QueryBehavior<TData, TError, TQueryFnData>
   /**
    * Set this to `false` to disable structural sharing between query results.
    * Defaults to `true`.
@@ -64,18 +67,7 @@ export interface QueryOptions<
    * The result will also be used to determine the value of `hasNextPage`.
    */
   getNextPageParam?: GetNextPageParamFunction<TQueryFnData>
-}
-
-export interface FetchQueryOptions<
-  TData = unknown,
-  TError = unknown,
-  TQueryFnData = TData
-> extends QueryOptions<TData, TError, TQueryFnData> {
-  /**
-   * The time in milliseconds after data is considered stale.
-   * If set to `Infinity`, the data will never be considered stale.
-   */
-  staleTime?: number
+  _defaulted?: boolean
 }
 
 export interface QueryObserverOptions<
@@ -83,13 +75,18 @@ export interface QueryObserverOptions<
   TError = unknown,
   TQueryFnData = TData,
   TQueryData = TQueryFnData
-> extends FetchQueryOptions<TData, TError, TQueryFnData> {
+> extends QueryOptions<TData, TError, TQueryFnData> {
   /**
    * Set this to `false` to disable automatic refetching when the query mounts or changes query keys.
    * To refetch the query, use the `refetch` method returned from the `useQuery` instance.
    * Defaults to `true`.
    */
   enabled?: boolean
+  /**
+   * The time in milliseconds after data is considered stale.
+   * If set to `Infinity`, the data will never be considered stale.
+   */
+  staleTime?: number
   /**
    * If set to a number, the query will continuously refetch at this frequency in milliseconds.
    * Defaults to `false`.
@@ -121,6 +118,11 @@ export interface QueryObserverOptions<
    * Defaults to `true`.
    */
   refetchOnMount?: boolean | 'always'
+  /**
+   * Whether a component should re-render when the `isStale` property changes.
+   * Defaults to `false`.
+   */
+  notifyOnStaleChange?: boolean
   /**
    * Whether a change to the query status should re-render a component.
    * If set to `false`, the component will only re-render when the actual `data` or `error` changes.
@@ -159,6 +161,35 @@ export interface QueryObserverOptions<
    * Defaults to `false`.
    */
   keepPreviousData?: boolean
+  /**
+   * If set, this value will be used as the placeholder data for this particular query observer while the query is still in the `loading` data and no initialData has been provided.
+   */
+  placeholderData?: TData | PlaceholderDataFunction<TData>
+}
+
+export interface InfiniteQueryObserverOptions<
+  TData = unknown,
+  TError = unknown,
+  TQueryFnData = TData,
+  TQueryData = TQueryFnData
+>
+  extends QueryObserverOptions<
+    InfiniteData<TData>,
+    TError,
+    TQueryFnData,
+    InfiniteData<TQueryData>
+  > {}
+
+export interface FetchQueryOptions<
+  TData = unknown,
+  TError = unknown,
+  TQueryFnData = TData
+> extends QueryOptions<TData, TError, TQueryFnData> {
+  /**
+   * The time in milliseconds after data is considered stale.
+   * If the data is fresh it will be returned from the cache.
+   */
+  staleTime?: number
 }
 
 export interface ResultOptions {
@@ -186,27 +217,20 @@ export interface FetchPreviousPageOptions extends ResultOptions {
 
 export type QueryStatus = 'idle' | 'loading' | 'error' | 'success'
 
-export interface QueryObserverResult<TData = unknown, TError = unknown> {
+export interface QueryObserverBaseResult<TData = unknown, TError = unknown> {
   data: TData | undefined
   error: TError | null
   failureCount: number
-  fetchNextPage: (
-    options?: FetchNextPageOptions
-  ) => Promise<QueryObserverResult<TData, TError>>
-  fetchPreviousPage: (
-    options?: FetchPreviousPageOptions
-  ) => Promise<QueryObserverResult<TData, TError>>
-  hasNextPage?: boolean
-  hasPreviousPage?: boolean
   isError: boolean
   isFetched: boolean
   isFetchedAfterMount: boolean
   isFetching: boolean
-  isFetchingNextPage?: boolean
-  isFetchingPreviousPage?: boolean
   isIdle: boolean
   isLoading: boolean
+  isLoadingError: boolean
+  isPlaceholderData: boolean
   isPreviousData: boolean
+  isRefetchError: boolean
   isStale: boolean
   isSuccess: boolean
   refetch: (
@@ -215,6 +239,228 @@ export interface QueryObserverResult<TData = unknown, TError = unknown> {
   remove: () => void
   status: QueryStatus
   updatedAt: number
+}
+
+export interface QueryObserverIdleResult<TData = unknown, TError = unknown>
+  extends QueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: null
+  isError: false
+  isIdle: true
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: false
+  status: 'idle'
+}
+
+export interface QueryObserverLoadingResult<TData = unknown, TError = unknown>
+  extends QueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: null
+  isError: false
+  isIdle: false
+  isLoading: true
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: false
+  status: 'loading'
+}
+
+export interface QueryObserverLoadingErrorResult<
+  TData = unknown,
+  TError = unknown
+> extends QueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: TError
+  isError: true
+  isIdle: false
+  isLoading: false
+  isLoadingError: true
+  isRefetchError: false
+  isSuccess: false
+  status: 'error'
+}
+
+export interface QueryObserverRefetchErrorResult<
+  TData = unknown,
+  TError = unknown
+> extends QueryObserverBaseResult<TData, TError> {
+  data: TData
+  error: TError
+  isError: true
+  isIdle: false
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: true
+  isSuccess: false
+  status: 'error'
+}
+
+export interface QueryObserverSuccessResult<TData = unknown, TError = unknown>
+  extends QueryObserverBaseResult<TData, TError> {
+  data: TData
+  error: null
+  isError: false
+  isIdle: false
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: true
+  status: 'success'
+}
+
+export type QueryObserverResult<TData = unknown, TError = unknown> =
+  | QueryObserverIdleResult<TData, TError>
+  | QueryObserverLoadingErrorResult<TData, TError>
+  | QueryObserverLoadingResult<TData, TError>
+  | QueryObserverRefetchErrorResult<TData, TError>
+  | QueryObserverSuccessResult<TData, TError>
+
+export interface InfiniteQueryObserverBaseResult<
+  TData = unknown,
+  TError = unknown
+> extends QueryObserverBaseResult<InfiniteData<TData>, TError> {
+  fetchNextPage: (
+    options?: FetchNextPageOptions
+  ) => Promise<InfiniteQueryObserverResult<TData, TError>>
+  fetchPreviousPage: (
+    options?: FetchPreviousPageOptions
+  ) => Promise<InfiniteQueryObserverResult<TData, TError>>
+  hasNextPage?: boolean
+  hasPreviousPage?: boolean
+  isFetchingNextPage: boolean
+  isFetchingPreviousPage: boolean
+}
+
+export interface InfiniteQueryObserverIdleResult<
+  TData = unknown,
+  TError = unknown
+> extends InfiniteQueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: null
+  isError: false
+  isIdle: true
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: false
+  status: 'idle'
+}
+
+export interface InfiniteQueryObserverLoadingResult<
+  TData = unknown,
+  TError = unknown
+> extends InfiniteQueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: null
+  isError: false
+  isIdle: false
+  isLoading: true
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: false
+  status: 'loading'
+}
+
+export interface InfiniteQueryObserverLoadingErrorResult<
+  TData = unknown,
+  TError = unknown
+> extends InfiniteQueryObserverBaseResult<TData, TError> {
+  data: undefined
+  error: TError
+  isError: true
+  isIdle: false
+  isLoading: false
+  isLoadingError: true
+  isRefetchError: false
+  isSuccess: false
+  status: 'error'
+}
+
+export interface InfiniteQueryObserverRefetchErrorResult<
+  TData = unknown,
+  TError = unknown
+> extends InfiniteQueryObserverBaseResult<TData, TError> {
+  data: InfiniteData<TData>
+  error: TError
+  isError: true
+  isIdle: false
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: true
+  isSuccess: false
+  status: 'error'
+}
+
+export interface InfiniteQueryObserverSuccessResult<
+  TData = unknown,
+  TError = unknown
+> extends InfiniteQueryObserverBaseResult<TData, TError> {
+  data: InfiniteData<TData>
+  error: null
+  isError: false
+  isIdle: false
+  isLoading: false
+  isLoadingError: false
+  isRefetchError: false
+  isSuccess: true
+  status: 'success'
+}
+
+export type InfiniteQueryObserverResult<TData = unknown, TError = unknown> =
+  | InfiniteQueryObserverIdleResult<TData, TError>
+  | InfiniteQueryObserverLoadingErrorResult<TData, TError>
+  | InfiniteQueryObserverLoadingResult<TData, TError>
+  | InfiniteQueryObserverRefetchErrorResult<TData, TError>
+  | InfiniteQueryObserverSuccessResult<TData, TError>
+
+export type MutationKey = string | unknown[]
+
+export type MutationStatus = 'idle' | 'loading' | 'success' | 'error'
+
+export type MutationFunction<TData = unknown, TVariables = unknown> = (
+  variables: TVariables
+) => Promise<TData>
+
+export interface MutationOptions<
+  TData = unknown,
+  TError = unknown,
+  TVariables = void,
+  TContext = unknown
+> {
+  mutationFn?: MutationFunction<TData, TVariables>
+  mutationKey?: string | unknown[]
+  variables?: TVariables
+  onMutate?: (variables: TVariables) => Promise<TContext> | TContext
+  onSuccess?: (
+    data: TData,
+    variables: TVariables,
+    context: TContext | undefined
+  ) => Promise<void> | void
+  onError?: (
+    error: TError,
+    variables: TVariables,
+    context: TContext | undefined
+  ) => Promise<void> | void
+  onSettled?: (
+    data: TData | undefined,
+    error: TError | null,
+    variables: TVariables,
+    context: TContext | undefined
+  ) => Promise<void> | void
+  retry?: RetryValue<TError>
+  retryDelay?: RetryDelayValue
+  _defaulted?: boolean
+}
+
+export interface MutationObserverOptions<
+  TData = unknown,
+  TError = unknown,
+  TVariables = void,
+  TContext = unknown
+> extends MutationOptions<TData, TError, TVariables, TContext> {
+  useErrorBoundary?: boolean
 }
 
 export interface MutateOptions<
@@ -241,18 +487,31 @@ export interface MutateOptions<
   ) => Promise<void> | void
 }
 
-export interface MutationOptions<
+export type MutateFunction<
   TData = unknown,
   TError = unknown,
   TVariables = void,
   TContext = unknown
-> extends MutateOptions<TData, TError, TVariables, TContext> {
-  onMutate?: (variables: TVariables) => Promise<TContext> | TContext
-  useErrorBoundary?: boolean
-  suspense?: boolean
+> = (
+  variables: TVariables,
+  options?: MutateOptions<TData, TError, TVariables, TContext>
+) => Promise<TData>
+
+export interface MutationObserverResult<
+  TData = unknown,
+  TError = unknown,
+  TVariables = void,
+  TContext = unknown
+> extends MutationState<TData, TError, TVariables, TContext> {
+  isError: boolean
+  isIdle: boolean
+  isLoading: boolean
+  isSuccess: boolean
+  mutate: MutateFunction<TData, TError, TVariables, TContext>
+  reset: () => void
 }
 
 export interface DefaultOptions<TError = unknown> {
   queries?: QueryObserverOptions<unknown, TError>
-  mutations?: MutationOptions<unknown, TError, unknown, unknown>
+  mutations?: MutationObserverOptions<unknown, TError, unknown, unknown>
 }

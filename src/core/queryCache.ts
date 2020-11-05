@@ -4,9 +4,11 @@ import {
   matchQuery,
   parseFilterArgs,
 } from './utils'
-import { Query } from './query'
+import { Query, QueryState } from './query'
 import type { QueryKey, QueryOptions } from './types'
 import { notifyManager } from './notifyManager'
+import type { QueryClient } from './queryClient'
+import { Subscribable } from './subscribable'
 
 // TYPES
 
@@ -18,19 +20,21 @@ type QueryCacheListener = (query?: Query) => void
 
 // CLASS
 
-export class QueryCache {
-  private listeners: QueryCacheListener[]
+export class QueryCache extends Subscribable<QueryCacheListener> {
   private queries: Query<any, any>[]
   private queriesMap: QueryHashMap
 
   constructor() {
-    this.listeners = []
+    super()
+
     this.queries = []
     this.queriesMap = {}
   }
 
   build<TData, TError, TQueryFnData>(
-    options: QueryOptions<TData, TError, TQueryFnData>
+    client: QueryClient,
+    options: QueryOptions<TData, TError, TQueryFnData>,
+    state?: QueryState<TData, TError>
   ): Query<TData, TError, TQueryFnData> {
     const hashFn = getQueryKeyHashFn(options)
     const queryKey = options.queryKey!
@@ -42,7 +46,9 @@ export class QueryCache {
         cache: this,
         queryKey,
         queryHash,
-        options,
+        options: client.defaultQueryOptions(options),
+        state,
+        defaultOptions: client.getQueryDefaults(queryKey),
       })
       this.add(query)
     }
@@ -98,24 +104,31 @@ export class QueryCache {
   findAll(arg1?: QueryKey | QueryFilters, arg2?: QueryFilters): Query[]
   findAll(arg1?: QueryKey | QueryFilters, arg2?: QueryFilters): Query[] {
     const [filters] = parseFilterArgs(arg1, arg2)
-    return filters && Object.keys(filters).length > 0
+    return filters
       ? this.queries.filter(query => matchQuery(filters, query))
       : this.queries
-  }
-
-  subscribe(listener: QueryCacheListener): () => void {
-    this.listeners.push(listener)
-    return () => {
-      this.listeners = this.listeners.filter(x => x !== listener)
-    }
   }
 
   notify(query?: Query<any, any>) {
     notifyManager.batch(() => {
       this.listeners.forEach(listener => {
-        notifyManager.schedule(() => {
-          listener(query)
-        })
+        listener(query)
+      })
+    })
+  }
+
+  onFocus(): void {
+    notifyManager.batch(() => {
+      this.queries.forEach(query => {
+        query.onFocus()
+      })
+    })
+  }
+
+  onOnline(): void {
+    notifyManager.batch(() => {
+      this.queries.forEach(query => {
+        query.onOnline()
       })
     })
   }

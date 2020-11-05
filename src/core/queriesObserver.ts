@@ -2,63 +2,49 @@ import { difference, getQueryKeyHashFn, replaceAt } from './utils'
 import { notifyManager } from './notifyManager'
 import type { QueryObserverOptions, QueryObserverResult } from './types'
 import type { QueryClient } from './queryClient'
-import type { QueryObserver } from './queryObserver'
-
-interface QueriesObserverConfig {
-  client: QueryClient
-  queries?: QueryObserverOptions[]
-}
+import { QueryObserver } from './queryObserver'
+import { Subscribable } from './subscribable'
 
 type QueriesObserverListener = (result: QueryObserverResult[]) => void
 
-export class QueriesObserver {
+export class QueriesObserver extends Subscribable<QueriesObserverListener> {
   private client: QueryClient
   private result: QueryObserverResult[]
   private queries: QueryObserverOptions[]
   private observers: QueryObserver[]
-  private listeners: QueriesObserverListener[]
 
-  constructor(config: QueriesObserverConfig) {
-    this.client = config.client
-    this.queries = config.queries || []
+  constructor(client: QueryClient, queries?: QueryObserverOptions[]) {
+    super()
+
+    this.client = client
+    this.queries = queries || []
     this.result = []
     this.observers = []
-    this.listeners = []
 
     // Subscribe to queries
     this.updateObservers()
   }
 
-  subscribe(listener?: QueriesObserverListener): () => void {
-    const callback = listener || (() => undefined)
-    this.listeners.push(callback)
+  protected onSubscribe(): void {
     if (this.listeners.length === 1) {
-      this.onMount()
-    }
-    return () => {
-      this.unsubscribe(callback)
-    }
-  }
-
-  private unsubscribe(listener: QueriesObserverListener): void {
-    this.listeners = this.listeners.filter(x => x !== listener)
-    if (!this.listeners.length) {
-      this.clear()
-    }
-  }
-
-  onMount(): void {
-    this.observers.forEach(observer => {
-      observer.subscribe(result => {
-        this.onUpdate(observer, result)
+      this.observers.forEach(observer => {
+        observer.subscribe(result => {
+          this.onUpdate(observer, result)
+        })
       })
-    })
+    }
   }
 
-  clear(): void {
+  protected onUnsubscribe(): void {
+    if (!this.listeners.length) {
+      this.destroy()
+    }
+  }
+
+  destroy(): void {
     this.listeners = []
     this.observers.forEach(observer => {
-      observer.clear()
+      observer.destroy()
     })
   }
 
@@ -97,7 +83,7 @@ export class QueriesObserver {
         return observer
       }
 
-      return this.client.watchQuery(defaultedOptions)
+      return new QueryObserver(this.client, defaultedOptions)
     })
 
     if (prevObservers.length === newObservers.length && !hasIndexChange) {
@@ -112,7 +98,7 @@ export class QueriesObserver {
     }
 
     difference(prevObservers, newObservers).forEach(observer => {
-      observer.clear()
+      observer.destroy()
     })
 
     difference(newObservers, prevObservers).forEach(observer => {
@@ -133,12 +119,9 @@ export class QueriesObserver {
   }
 
   private notify(): void {
-    const { result, listeners } = this
     notifyManager.batch(() => {
-      listeners.forEach(listener => {
-        notifyManager.schedule(() => {
-          listener(result)
-        })
+      this.listeners.forEach(listener => {
+        listener(this.result)
       })
     })
   }

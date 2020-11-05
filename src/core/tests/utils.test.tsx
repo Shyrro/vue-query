@@ -6,8 +6,8 @@ describe('core/utils', () => {
   it('setLogger should override the default logger', async () => {
     const key = queryKey()
 
-    const cache = new QueryCache()
-    const client = new QueryClient({ cache })
+    const queryCache = new QueryCache()
+    const queryClient = new QueryClient({ queryCache })
 
     const logger: Logger = {
       error: jest.fn(),
@@ -17,7 +17,7 @@ describe('core/utils', () => {
 
     setLogger(logger)
 
-    await client.prefetchQuery(
+    await queryClient.prefetchQuery(
       key,
       async () => {
         throw new Error('Test')
@@ -61,6 +61,12 @@ describe('core/utils', () => {
       const a = { a: { b: 'b' }, c: 'c', d: [] }
       const b = { a: { b: 'b' }, c: 'c', d: [{ d: 'd ' }] }
       expect(partialDeepEqual(a, b)).toEqual(false)
+    })
+
+    it('should return `true` if array a includes array b', () => {
+      const a = [1, 2, 3]
+      const b = [1, 2]
+      expect(partialDeepEqual(a, b)).toEqual(true)
     })
   })
 

@@ -18,14 +18,13 @@ export default {
   components: {
     QueryClientProvider,
     HelloWorld,
-    QueryErrorResetBoundary
+    QueryErrorResetBoundary,
   },
   setup() {
-    const cache = new QueryCache()
-    const client = new QueryClient({ cache })
-
+    const queryCache = new QueryCache()
+    const client = new QueryClient({ queryCache })
     return {
-      client,
+      client
     }
   },
 }

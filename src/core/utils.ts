@@ -1,5 +1,8 @@
 import type { Query } from './query'
 import type {
+  MutationFunction,
+  MutationKey,
+  MutationOptions,
   QueryFunction,
   QueryKey,
   QueryKeyHashFunction,
@@ -18,10 +21,6 @@ export interface QueryFilters {
    * Match query key exactly
    */
   exact?: boolean
-  /**
-   * Include or exclude fresh queries
-   */
-  fresh?: boolean
   /**
    * Include or exclude inactive queries
    */
@@ -50,24 +49,6 @@ export type Updater<TInput, TOutput> =
   | TOutput
   | DataUpdateFunction<TInput, TOutput>
 
-interface Cancelable {
-  cancel(): void
-}
-
-export interface CancelOptions {
-  revert?: boolean
-  silent?: boolean
-}
-
-export class CancelledError {
-  revert?: boolean
-  silent?: boolean
-  constructor(options?: CancelOptions) {
-    this.revert = options?.revert
-    this.silent = options?.silent
-  }
-}
-
 // UTILS
 
 export const isServer = typeof window === 'undefined'
@@ -85,32 +66,12 @@ export function functionalUpdate<TInput, TOutput>(
     : updater
 }
 
-export function defaultRetryDelay(attempt: number) {
-  return Math.min(1000 * 2 ** attempt, 30000)
-}
-
 export function isValidTimeout(value: any): value is number {
   return typeof value === 'number' && value >= 0 && value !== Infinity
 }
 
-export function isDocumentVisible(): boolean {
-  // document global can be unavailable in react native
-  if (typeof document === 'undefined') {
-    return true
-  }
-  return [undefined, 'visible', 'prerender'].includes(document.visibilityState)
-}
-
-export function isOnline(): boolean {
-  return navigator.onLine === undefined || navigator.onLine
-}
-
 export function ensureArray<T>(value: T | T[]): T[] {
   return Array.isArray(value) ? value : [value]
-}
-
-export function uniq<T>(array: T[]): T[] {
-  return array.filter((value, i) => array.indexOf(value) === i)
 }
 
 export function difference<T>(array1: T[], array2: T[]): T[] {
@@ -143,6 +104,27 @@ export function parseQueryArgs<TOptions extends QueryOptions<any, any>>(
   return { ...arg2, queryKey: arg1 } as TOptions
 }
 
+export function parseMutationArgs<
+  TOptions extends MutationOptions<any, any, any, any>
+>(
+  arg1: MutationKey | MutationFunction<any, any> | TOptions,
+  arg2?: MutationFunction<any, any> | TOptions,
+  arg3?: TOptions
+): TOptions {
+  if (isQueryKey(arg1)) {
+    if (typeof arg2 === 'function') {
+      return { ...arg3, mutationKey: arg1, mutationFn: arg2 } as TOptions
+    }
+    return { ...arg2, mutationKey: arg1 } as TOptions
+  }
+
+  if (typeof arg1 === 'function') {
+    return { ...arg2, mutationFn: arg1 } as TOptions
+  }
+
+  return { ...arg1 } as TOptions
+}
+
 export function parseFilterArgs<
   TFilters extends QueryFilters,
   TOptions = unknown
@@ -164,7 +146,6 @@ export function matchQuery(
     active,
     exact,
     fetching,
-    fresh,
     inactive,
     predicate,
     queryKey,
@@ -177,9 +158,7 @@ export function matchQuery(
       if (query.queryHash !== hashFn(queryKey)) {
         return false
       }
-    } else if (
-      !partialDeepEqual(ensureArray(query.queryKey), ensureArray(queryKey))
-    ) {
+    } else if (!partialMatchKey(query.queryKey, queryKey)) {
       return false
     }
   }
@@ -196,15 +175,7 @@ export function matchQuery(
     return false
   }
 
-  let isStale
-
-  if (fresh === false || (stale && !fresh)) {
-    isStale = true
-  } else if (stale === false || (fresh && !stale)) {
-    isStale = false
-  }
-
-  if (typeof isStale === 'boolean' && query.isStale() !== isStale) {
+  if (typeof stale === 'boolean' && query.isStale() !== stale) {
     return false
   }
 
@@ -249,6 +220,16 @@ export function stableValueHash(value: any): string {
 }
 
 /**
+ * Checks if key `b` partially matches with key `a`.
+ */
+export function partialMatchKey(
+  a: string | unknown[],
+  b: string | unknown[]
+): boolean {
+  return partialDeepEqual(ensureArray(a), ensureArray(b))
+}
+
+/**
  * Checks if `b` partially matches with `a`.
  */
 export function partialDeepEqual(a: any, b: any): boolean {
@@ -260,7 +241,7 @@ export function partialDeepEqual(a: any, b: any): boolean {
     return false
   }
 
-  if (typeof a === 'object') {
+  if (typeof a === 'object' && typeof b === 'object') {
     return !Object.keys(b).some(key => !partialDeepEqual(a[key], b[key]))
   }
 
@@ -306,11 +287,16 @@ export function replaceEqualDeep(a: any, b: any): any {
  * Shallow compare objects. Only works with objects that always have the same properties.
  */
 export function shallowEqualObjects<T>(a: T, b: T): boolean {
+  if ((a && !b) || (b && !a)) {
+    return false
+  }
+
   for (const key in a) {
     if (a[key] !== b[key]) {
       return false
     }
   }
+
   return true
 }
 
@@ -349,16 +335,8 @@ export function isQueryKey(value: any): value is QueryKey {
   return typeof value === 'string' || Array.isArray(value)
 }
 
-export function isCancelable(value: any): value is Cancelable {
-  return typeof value?.cancel === 'function'
-}
-
 export function isError(value: any): value is Error {
   return value instanceof Error
-}
-
-export function isCancelledError(value: any): value is CancelledError {
-  return value instanceof CancelledError
 }
 
 export function sleep(timeout: number): Promise<void> {
